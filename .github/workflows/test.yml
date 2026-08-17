@@ -13,8 +13,8 @@ jobs:
     name: npm test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
       - run: npm ci
@@ -24,14 +24,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-latest
-          - ubuntu-22.04
-          - ubuntu-24.04-arm
+        os: ${{ github.actor == 'dependabot[bot]' && fromJSON('["ubuntu-latest"]') || fromJSON('["ubuntu-latest", "ubuntu-22.04", "ubuntu-24.04-arm"]') }}
     name: Native installer / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Test official installer (pinned version)
         uses: ./
@@ -60,17 +57,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-latest
-          - windows-latest
-          - macos-latest
-          - ubuntu-22.04
-          - ubuntu-24.04-arm
-        python:
-          - "3.10"
-          - "3.11"
-          - "3.12"
-          - "3.13"
+        os: ${{ github.actor == 'dependabot[bot]' && fromJSON('["ubuntu-latest"]') || fromJSON('["ubuntu-latest", "windows-latest", "macos-latest", "ubuntu-22.04", "ubuntu-24.04-arm"]') }}
+        python: ${{ github.actor == 'dependabot[bot]' && fromJSON('["3.13"]') || fromJSON('["3.10", "3.11", "3.12", "3.13"]') }}
     name: PyPI / ${{ matrix.os }} / ${{ matrix.python }}
     runs-on: ${{ matrix.os }}
     env:
@@ -78,8 +66,8 @@ jobs:
       SAM_VERSION: ${{ contains(fromJson('["3.12", "3.13"]'), matrix.python) && '1.128.0' || '1.18.2' }}
       INSTALLER_VERSION: ${{ contains( matrix.os, '-arm') && '1.130.0' || '1.71.0' }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
 
@@ -120,7 +108,7 @@ jobs:
       - run: sam init --name sam-app --runtime nodejs20.x --dependency-manager npm --app-template hello-world
 
       # Test sam build
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
       - run: sam build

@@ -22,12 +22,12 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: step-security/setup-sam@v3
         with:
           use-installer: true
           token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: aws-actions/configure-aws-credentials@v6
+      - uses: step-security/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ secrets.ASSUME_ROLE_ARN }}
           role-session-name: ci
@@ -74,10 +74,6 @@ You can use [`actions/setup-python`](https://github.com/actions/setup-python) to
 The GITHUB Authentication token to use for calling the GITHUB [Get the latest release](https://docs.github.com/en/rest/releases/releases?apiVersion=2022-11-28#get-the-latest-release) API. Defaults to call the API as unauthenticated request if not specified.
 
 The parameter can accept either [`GITHUB_TOKEN`](https://docs.github.com/en/actions/security-guides/automatic-token-authentication) or [`PAT(Personal Access Token)`](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens) tokens.
-
-## Security
-
-See [CONTRIBUTING.md](CONTRIBUTING.md#security-disclosures) for more information.
 
 ## License
 
