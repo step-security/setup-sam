@@ -4,6 +4,7 @@ jest.mock("@actions/io");
 jest.mock("@actions/tool-cache");
 jest.mock("@actions/cache");
 
+const fs = require("fs");
 const os = require("os");
 
 const core = require("@actions/core");
@@ -12,6 +13,10 @@ const io = require("@actions/io");
 const tc = require("@actions/tool-cache");
 const cache = require("@actions/cache");
 const httpm = require("@actions/http-client");
+
+// SHA-256 of an empty buffer — used to make checksum verification pass in tests
+const EMPTY_SHA256 =
+  "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
 const setup = require("../lib/setup");
 
@@ -156,6 +161,11 @@ test.each([
     tc.downloadTool = jest
       .fn()
       .mockResolvedValueOnce("/path/to/downloaded/sam");
+    jest.spyOn(fs, "readFileSync").mockReturnValueOnce(Buffer.alloc(0));
+    jest.spyOn(httpm.HttpClient.prototype, "get").mockResolvedValueOnce({
+      message: { statusCode: 200 },
+      readBody: () => EMPTY_SHA256,
+    });
 
     await setup();
 
@@ -211,12 +221,16 @@ test.each([
     core.getBooleanInput = jest.fn().mockReturnValue(true);
     core.getInput = jest.fn().mockReturnValueOnce("");
 
-    jest.spyOn(httpm.HttpClient.prototype, "get").mockResolvedValue({
-      message: { statusCode: 200 },
-      readBody: () => {
-        return `{ "tag_name": "v1.139.0" }`;
-      },
-    });
+    jest
+      .spyOn(httpm.HttpClient.prototype, "get")
+      .mockResolvedValueOnce({
+        message: { statusCode: 200 },
+        readBody: () => `{ "tag_name": "v1.139.0" }`,
+      })
+      .mockResolvedValueOnce({
+        message: { statusCode: 200 },
+        readBody: () => EMPTY_SHA256,
+      });
 
     cache.restoreCache = jest.fn().mockResolvedValueOnce(undefined);
     cache.saveCache = jest.fn().mockResolvedValueOnce(1);
@@ -224,6 +238,7 @@ test.each([
     tc.downloadTool = jest
       .fn()
       .mockResolvedValueOnce("/path/to/downloaded/sam");
+    jest.spyOn(fs, "readFileSync").mockReturnValueOnce(Buffer.alloc(0));
 
     await setup();
 
@@ -287,11 +302,13 @@ test.each([
 
   const getMock = jest
     .spyOn(httpm.HttpClient.prototype, "get")
-    .mockResolvedValue({
+    .mockResolvedValueOnce({
       message: { statusCode: 200 },
-      readBody: () => {
-        return `{ "tag_name": "${test.releaseTagVersion}" }`;
-      },
+      readBody: () => `{ "tag_name": "${test.releaseTagVersion}" }`,
+    })
+    .mockResolvedValueOnce({
+      message: { statusCode: 200 },
+      readBody: () => EMPTY_SHA256,
     });
 
   core.getBooleanInput = jest.fn().mockReturnValue(test.input.userInstaller);
@@ -305,6 +322,7 @@ test.each([
   cache.saveCache = jest.fn().mockResolvedValueOnce(1);
   tc.extractZip = jest.fn().mockResolvedValueOnce(undefined);
   tc.downloadTool = jest.fn().mockResolvedValueOnce("/path/to/downloaded/sam");
+  jest.spyOn(fs, "readFileSync").mockReturnValueOnce(Buffer.alloc(0));
 
   await setup();
 
@@ -339,7 +357,11 @@ test.each([
     jest.spyOn(os, "arch").mockReturnValue(archInput);
     jest
       .spyOn(httpm.HttpClient.prototype, "get")
-      .mockRejectedValueOnce(new Error("Mocked exception"));
+      .mockRejectedValueOnce(new Error("Mocked exception"))
+      .mockResolvedValueOnce({
+        message: { statusCode: 200 },
+        readBody: () => EMPTY_SHA256,
+      });
 
     core.getBooleanInput = jest.fn().mockReturnValue(true);
     core.getInput = jest.fn().mockReturnValueOnce("");
@@ -348,6 +370,7 @@ test.each([
     tc.downloadTool = jest
       .fn()
       .mockResolvedValueOnce("/path/to/downloaded/sam");
+    jest.spyOn(fs, "readFileSync").mockReturnValueOnce(Buffer.alloc(0));
 
     await setup();
 
