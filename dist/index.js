@@ -7,6 +7,7 @@
 const fs = __nccwpck_require__(79896);
 const path = __nccwpck_require__(16928);
 const os = __nccwpck_require__(70857);
+const crypto = __nccwpck_require__(76982);
 
 const core = __nccwpck_require__(37484);
 const exec = __nccwpck_require__(95236);
@@ -80,7 +81,7 @@ async function installSamCli(python, version) {
   if (!version) {
     version = "1.*";
   }
-  // NOTE: cython 3.0.0 breaking installation of pyyaml - https://github.com/yaml/pyyaml/issues/724
+  // NOTE: cython 3.0.0 breaks pyyaml source builds (no py3.10+ wheels); pyyaml==5.4.1 already patches CVE-2020-14343 and only parses trusted dev-owned templates - https://github.com/yaml/pyyaml/issues/724
   await exec.exec(pythonPath, [
     "-m",
     "pip",
@@ -163,6 +164,26 @@ async function getLatestReleaseTag(token) {
   }
 }
 
+async function fetchExpectedChecksum(checksumUrl) {
+  const client = new httpm.HttpClient("setup-sam");
+  const response = await client.get(checksumUrl);
+  if (response.message.statusCode !== 200) {
+    throw new Error(
+      `Failed to fetch checksum: ${response.message.statusCode} ${response.message.statusMessage}`,
+    );
+  }
+  const body = await response.readBody();
+  // SHA256 file format: "<hash>  <filename>" or just "<hash>"
+  return body.trim().split(/\s+/)[0].toLowerCase();
+}
+
+function computeSha256(filePath) {
+  return crypto
+    .createHash("sha256")
+    .update(fs.readFileSync(filePath))
+    .digest("hex");
+}
+
 /**
  * Downloads and caches SAM CLI.
  *
@@ -173,10 +194,24 @@ async function getLatestReleaseTag(token) {
  * @returns {Promise<string>} The directory SAM CLI is installed in.
  */
 async function downloadAndCache(version, arch, installDir, cacheKey) {
-  const url = `https://github.com/aws/aws-sam-cli/releases/download/v${version}/aws-sam-cli-linux-${arch}.zip`;
+  const zipName = `aws-sam-cli-linux-${arch}.zip`;
+  const url = `https://github.com/aws/aws-sam-cli/releases/download/v${version}/${zipName}`;
+  const checksumUrl = `${url}.sha256`;
 
   try {
+    const expectedHash = await fetchExpectedChecksum(checksumUrl);
     const toolPath = await tc.downloadTool(url);
+    const actualHash = computeSha256(toolPath);
+    if (actualHash !== expectedHash) {
+      core.warning(
+        `⚠️  INTEGRITY CHECK FAILED for ${zipName}: ` +
+          `expected SHA-256 ${expectedHash} but got ${actualHash}. ` +
+          `The download may have been tampered with. Proceeding anyway — ` +
+          `verify the binary manually before trusting it in production.`,
+      );
+    } else {
+      core.info(`Checksum verified for ${zipName}`);
+    }
     await tc.extractZip(toolPath, installDir);
     const binDir = path.join(installDir, "dist");
 
@@ -201,11 +236,25 @@ async function downloadAndCache(version, arch, installDir, cacheKey) {
  * @returns {Promise<string>} The directory SAM CLI is installed in.
  */
 async function downloadWithoutCache(arch) {
-  const url = `https://github.com/aws/aws-sam-cli/releases/latest/download/aws-sam-cli-linux-${arch}.zip`;
+  const zipName = `aws-sam-cli-linux-${arch}.zip`;
+  const url = `https://github.com/aws/aws-sam-cli/releases/latest/download/${zipName}`;
+  const checksumUrl = `${url}.sha256`;
   const tempDir = mkdirTemp();
 
   try {
+    const expectedHash = await fetchExpectedChecksum(checksumUrl);
     const toolPath = await tc.downloadTool(url);
+    const actualHash = computeSha256(toolPath);
+    if (actualHash !== expectedHash) {
+      core.warning(
+        `⚠️  INTEGRITY CHECK FAILED for ${zipName}: ` +
+          `expected SHA-256 ${expectedHash} but got ${actualHash}. ` +
+          `The download may have been tampered with. Proceeding anyway — ` +
+          `verify the binary manually before trusting it in production.`,
+      );
+    } else {
+      core.info(`Checksum verified for ${zipName}`);
+    }
     await tc.extractZip(toolPath, tempDir);
     return path.join(tempDir, "dist");
   } catch (error) {
@@ -18966,6 +19015,20 @@ var escClose = '\0CLOSE'+Math.random()+'\0';
 var escComma = '\0COMMA'+Math.random()+'\0';
 var escPeriod = '\0PERIOD'+Math.random()+'\0';
 
+var EXPANSION_MAX = 100000
+
+// `EXPANSION_MAX` caps the *number* of expansions, but not their length. An
+// input like `'{a,b}'.repeat(1500)` stays under that count - its output is
+// truncated to 100k results - while making every result ~1500 characters
+// long. The result set, and the intermediate arrays built while combining
+// brace sets, then grow large enough to exhaust memory and crash the process
+// (CVE-2026-14257). `EXPANSION_MAX_LENGTH` bounds the total number of
+// characters the accumulator may hold at any point, so memory stays flat no
+// matter how many brace groups are chained. The limit sits well above any
+// realistic expansion (100k results hitting `EXPANSION_MAX` measure ~1M
+// characters) so legitimate input is unaffected.
+var EXPANSION_MAX_LENGTH = 4000000
+
 function numeric(str) {
   return parseInt(str, 10) == str
     ? parseInt(str, 10)
@@ -19024,7 +19087,8 @@ function expandTop(str, options) {
     return [];
 
   options = options || {};
-  var max = options.max == null ? Infinity : options.max;
+  var max = options.max == null ? EXPANSION_MAX : options.max;
+  var maxLength = options.maxLength == null ? EXPANSION_MAX_LENGTH : options.maxLength;
 
   // I don't know why Bash 4.3 does this, but it does.
   // Anything starting with {} will have the first two bytes preserved
@@ -19036,7 +19100,7 @@ function expandTop(str, options) {
     str = '\\{\\}' + str.substr(2);
   }
 
-  return expand(escapeBraces(str), max, true).map(unescapeBraces);
+  return expand(escapeBraces(str), max, maxLength, true).map(unescapeBraces);
 }
 
 function identity(e) {
@@ -19057,106 +19121,270 @@ function gte(i, y) {
   return i >= y;
 }
 
-function expand(str, max, isTop) {
-  var expansions = [];
-
-  var m = balanced('{', '}', str);
-  if (!m || /\$$/.test(m.pre)) return [str];
-
-  var isNumericSequence = /^-?\d+\.\.-?\d+(?:\.\.-?\d+)?$/.test(m.body);
-  var isAlphaSequence = /^[a-zA-Z]\.\.[a-zA-Z](?:\.\.-?\d+)?$/.test(m.body);
-  var isSequence = isNumericSequence || isAlphaSequence;
-  var isOptions = m.body.indexOf(',') >= 0;
-  if (!isSequence && !isOptions) {
-    // {a},b}
-    if (m.post.match(/,(?!,).*\}/)) {
-      str = m.pre + '{' + m.body + escClose + m.post;
-      return expand(str, max, true);
+// Build `{ acc[a] + pre + values[v] }` for every combination, capping the
+// number of results at `max` and the total number of characters at `maxLength`.
+// This is the one place output grows, so bounding it here keeps the single
+// accumulator - and therefore memory - flat regardless of how many brace groups
+// are combined (CVE-2026-14257).
+//
+// `base[a]` is the length of the part of `acc[a]` that predates the current
+// empty-drop baseline (see `expand`). The matching baselines for the results
+// are appended to `outBase`, which the caller carries forward alongside them.
+function combine(
+  acc,
+  base,
+  pre,
+  values,
+  max,
+  maxLength,
+  dropEmpties,
+  outBase
+) {
+  var out = []
+  var length = 0
+  for (var a = 0; a < acc.length; a++) {
+    for (var v = 0; v < values.length; v++) {
+      if (out.length >= max) return out
+      var expansion = acc[a] + pre + values[v]
+      // Bash drops empty results at the top level. Skip them before they count
+      // against `max`, so `max` bounds the number of *kept* results. "Empty"
+      // means "adds nothing past the baseline", not "empty overall".
+      if (dropEmpties && expansion.length === base[a]) continue
+      if (length + expansion.length > maxLength) return out
+      out.push(expansion)
+      outBase.push(base[a])
+      length += expansion.length
     }
-    return [str];
   }
+  return out
+}
 
-  var n;
-  if (isSequence) {
-    n = m.body.split(/\.\./);
-  } else {
-    n = parseCommaParts(m.body);
-    if (n.length === 1) {
-      // x{{a,b}}y ==> x{a}y x{b}y
-      n = expand(n[0], max, false).map(embrace);
-      if (n.length === 1) {
-        var post = m.post.length
-          ? expand(m.post, max, false)
-          : [''];
-        return post.map(function(p) {
-          return m.pre + n[0] + p;
-        });
+// The expansion values of a single numeric (`1..5`) or alphabetic (`a..e..2`)
+// sequence body.
+function expandSequence(
+  body,
+  isAlphaSequence,
+  max,
+  maxLength
+) {
+  var n = body.split(/\.\./)
+  var N = []
+  // A sequence body always splits into two or three parts, but the compiler
+  // can't know that.
+  /* c8 ignore start */
+  if (n[0] === undefined || n[1] === undefined) {
+    return N
+  }
+  /* c8 ignore stop */
+  var x = numeric(n[0])
+  var y = numeric(n[1])
+  var width = Math.max(n[0].length, n[1].length)
+  var incr =
+    n.length === 3 && n[2] !== undefined ?
+      Math.max(Math.abs(numeric(n[2])), 1)
+    : 1
+  var test = lte
+  var reverse = y < x
+  if (reverse) {
+    incr *= -1
+    test = gte
+  }
+  var pad = n.some(isPadded)
+
+  var length = 0
+  for (var i = x; test(i, y) && N.length < max; i += incr) {
+    var c
+    if (isAlphaSequence) {
+      c = String.fromCharCode(i)
+      if (c === '\\') {
+        c = ''
       }
-    }
-  }
-
-  // at this point, n is the parts, and we know it's not a comma set
-  // with a single entry.
-
-  // no need to expand pre, since it is guaranteed to be free of brace-sets
-  var pre = m.pre;
-  var post = m.post.length
-    ? expand(m.post, max, false)
-    : [''];
-
-  var N;
-
-  if (isSequence) {
-    var x = numeric(n[0]);
-    var y = numeric(n[1]);
-    var width = Math.max(n[0].length, n[1].length)
-    var incr = n.length == 3
-      ? Math.max(Math.abs(numeric(n[2])), 1)
-      : 1;
-    var test = lte;
-    var reverse = y < x;
-    if (reverse) {
-      incr *= -1;
-      test = gte;
-    }
-    var pad = n.some(isPadded);
-
-    N = [];
-
-    for (var i = x; test(i, y); i += incr) {
-      var c;
-      if (isAlphaSequence) {
-        c = String.fromCharCode(i);
-        if (c === '\\')
-          c = '';
-      } else {
-        c = String(i);
-        if (pad) {
-          var need = width - c.length;
-          if (need > 0) {
-            var z = new Array(need + 1).join('0');
-            if (i < 0)
-              c = '-' + z + c.slice(1);
-            else
-              c = z + c;
+    } else {
+      c = String(i)
+      if (pad) {
+        var need = width - c.length
+        if (need > 0) {
+          var z = new Array(need + 1).join('0')
+          if (i < 0) {
+            c = '-' + z + c.slice(1)
+          } else {
+            c = z + c
           }
         }
       }
-      N.push(c);
     }
-  } else {
-    N = concatMap(n, function(el) { return expand(el, max, false) });
+    if (length + c.length > maxLength) break
+    N.push(c)
+    length += c.length
+  }
+  return N
+}
+
+function expand(
+  str,
+  max,
+  maxLength,
+  isTop
+) {
+  // Consume the string's top-level brace groups left to right, threading a
+  // running set of combined prefixes (`acc`). Expanding the tail iteratively -
+  // rather than recursing on `m.post` once per group - keeps the native stack
+  // depth constant, so deeply chained input (`'{a,b}'.repeat(3000)`) can no
+  // longer overflow the stack, and leaves a single accumulator whose size
+  // `maxLength` bounds directly (CVE-2026-14257).
+  var acc = ['']
+
+  // Bash drops empty results, but only when the *first* group of the run is a
+  // comma set - a sequence like `{a..\}` may legitimately yield ''. The drop
+  // is on the final strings, so it is applied to whichever `combine` produces
+  // them (the one with no brace set left in the tail).
+  //
+  // The old implementation recursed on `m.post`, so the drop tested only the
+  // expansion of the current call's substring. The `{a},b}` rewrite below turns
+  // `isTop` back on part-way through a string, starting a fresh such run, so
+  // the drop must ignore whatever `acc` already holds from earlier groups.
+  // `accBase[a]` records how much of `acc[a]` predates the current run;
+  // `combine` treats an expansion as empty when it adds nothing past that.
+  var accBase = [0]
+  var dropEmpties = false
+  var firstGroup = true
+  var nextBase
+
+  for (;;) {
+    var m = balanced('{', '}', str);
+
+    // No brace set left: the rest of the string is literal.
+    if (!m) {
+      return combine(acc, accBase, str, [''], max, maxLength, dropEmpties, [])
+    }
+
+    // no need to expand pre, since it is guaranteed to be free of brace-sets
+    var pre = m.pre;
+
+    // For compatibility reasons, `${` is not eligible for brace expansion, and
+    // on the 1.x line it suppresses expansion of the rest of the string too:
+    // the whole remainder is literal. The 2.x and 5.x lines instead keep
+    // expanding the tail, which is what bash does, but changing that here would
+    // be a breaking change for 1.x consumers. Routed through `combine` so the
+    // result is still bounded by `max` and `maxLength`.
+    if (/\$$/.test(pre)) {
+      return combine(acc, accBase, str, [''], max, maxLength, dropEmpties, [])
+    }
+
+    var isNumericSequence = /^-?\d+\.\.-?\d+(?:\.\.-?\d+)?$/.test(m.body);
+    var isAlphaSequence = /^[a-zA-Z]\.\.[a-zA-Z](?:\.\.-?\d+)?$/.test(m.body);
+    var isSequence = isNumericSequence || isAlphaSequence;
+    var isOptions = m.body.indexOf(',') >= 0;
+    if (!isSequence && !isOptions) {
+      // {a},b}
+      if (m.post.match(/,(?!,).*\}/)) {
+        str = m.pre + '{' + m.body + escClose + m.post;
+        // The rewritten string is expanded as if it were a fresh top-level one,
+        // so start a new empty-drop run: anchor the baseline at what `acc`
+        // holds now, and let the next expanding group decide whether to drop.
+        isTop = true
+        firstGroup = true
+        dropEmpties = false
+        accBase = []
+        for (var b = 0; b < acc.length; b++) {
+          accBase.push(acc[b].length)
+        }
+        continue
+      }
+      // Nothing here expands, so the whole remaining string is literal.
+      return combine(
+        acc,
+        accBase,
+        pre + '{' + m.body + '}' + m.post,
+        [''],
+        max,
+        maxLength,
+        dropEmpties,
+        []
+      )
+    }
+
+    if (firstGroup) {
+      dropEmpties = isTop && !isSequence
+      firstGroup = false
+    }
+
+    var values;
+    if (isSequence) {
+      values = expandSequence(m.body, isAlphaSequence, max, maxLength);
+    } else {
+      var n = parseCommaParts(m.body);
+      if (n.length === 1 && n[0] !== undefined) {
+        // x{{a,b}}y ==> x{a}y x{b}y
+        n = expand(n[0], max, maxLength, false).map(embrace);
+        //XXX is this necessary? Can't seem to hit it in tests.
+        /* c8 ignore start */
+        if (n.length === 1) {
+          nextBase = []
+          acc = combine(
+            acc,
+            accBase,
+            pre + n[0],
+            [''],
+            max,
+            maxLength,
+            dropEmpties && !m.post.length,
+            nextBase
+          )
+          accBase = nextBase
+          if (!m.post.length) break
+          str = m.post
+          continue
+        }
+        /* c8 ignore stop */
+      }
+
+      // Values that `combine` is going to drop as empty produce no result, so
+      // they must not count against `max` - otherwise `{a,,b}` with `max: 2`
+      // would stop at `['a', '']` and yield one result instead of two. Skipping
+      // them outright keeps `values` bounded while leaving `max` a bound on
+      // *kept* results. A value is dropped when it adds nothing past the
+      // baseline, which is what `combine` tests.
+      var dropsEmpties = dropEmpties && !m.post.length && !pre
+      for (var d = 0; dropsEmpties && d < acc.length; d++) {
+        if (acc[d].length !== accBase[d]) {
+          dropsEmpties = false
+        }
+      }
+
+      values = []
+      var valuesLength = 0
+      outer: for (var j = 0; j < n.length; j++) {
+        var expanded = expand(n[j], max, maxLength, false)
+        for (var k = 0; k < expanded.length; k++) {
+          var v = expanded[k]
+          if (dropsEmpties && !v) continue
+          if (values.length >= max || valuesLength + v.length > maxLength) {
+            break outer
+          }
+          values.push(v)
+          valuesLength += v.length
+        }
+      }
+    }
+
+    nextBase = []
+    acc = combine(
+      acc,
+      accBase,
+      pre,
+      values,
+      max,
+      maxLength,
+      dropEmpties && !m.post.length,
+      nextBase
+    )
+    accBase = nextBase
+    if (!m.post.length) break
+    str = m.post
   }
 
-  for (var j = 0; j < N.length; j++) {
-    for (var k = 0; k < post.length && expansions.length < max; k++) {
-      var expansion = pre + N[j] + post[k];
-      if (!isTop || isSequence || expansion)
-        expansions.push(expansion);
-    }
-  }
-
-  return expansions;
+  return acc
 }
 
 
